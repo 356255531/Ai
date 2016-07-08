@@ -1,0 +1,826 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "application/javascript": [
+       "IPython.notebook.set_autosave_interval(0)"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Autosave disabled\n"
+     ]
+    }
+   ],
+   "source": [
+    "import tracking\n",
+    "\n",
+    "from tracking import util\n",
+    "from tracking import layout\n",
+    "from tracking import busters\n",
+    "\n",
+    "from tracking.busters import Actions, Directions\n",
+    "from tracking.pacman_utils import NotebookGraphics\n",
+    "from tracking.inference import InferenceModule\n",
+    "\n",
+    "rules = tracking.busters.BustersGameRules()\n",
+    "%autosave 0\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Probabilistic Pacman"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Introduction"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "*Note*: Like assignment 3, this exercise is adapted from the Berkeley AI course. You can access the origninal API description and some other material on the following site: http://ai.berkeley.edu/tracking.html\n",
+    "\n",
+    "In the Pacman version of Ghostbusters, the goal is to hunt down scared but invisible ghosts. Pacman is equipped with a sonar sensor that provide noisy readings of the Manhattan distance to each ghost. The game ends when Pacman has eaten all the ghosts.\n",
+    "\n",
+    "Your primary task in this project is to implement inference to track the ghosts based on the information retrieved by this sensor. Fortunately, Bayes Nets provide us with powerful tools for making the most of the information we have. Throughout the rest of this project, you will implement algorithms for performing exact inference using Bayes' Nets.\n",
+    "\n",
+    "The colored squares in the visualization indicate the probability of a ghost being in that square, given the noisy distance readings provided to Pacman. \n",
+    "Each block is colored according to the **maximum (among the different ghosts, if there is more than one)** probability to see a ghost there, so the visualization of the probabilities doesn't mix colors.\n",
+    "\n",
+    "When evaluating your code with the autograder, it will be helpful to have some understanding of what the autograder is doing. There are 2 types of tests in this project. For tests of class `DoubleInferenceAgentTest`, the probability distributions computed by your code will be compared with the staff's distributions. The second type of test is `GameScoreTest` (for the third exercise), in which your `BustersAgent` will actually select actions for Pacman.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Sensor Model"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "In this question, you will implement the `observe` method in the `ExactInference` class to correctly update the agent's belief distribution over ghost positions given an observation from Pacman's sensors. A correct implementation should also handle one special case: when a ghost is eaten, you should place that ghost in its prison cell, as described in the comments of `observe`.\n",
+    "\n",
+    "The sensor model of Pacman's sonar describes the probability of receiving a sensor reading, given the correct distance to the ghost: $P(noisyDistance \\vert trueDistance)$. The model is defined as follows: The noisy distances that Pacman receives are always non-negative, and always within 7 of the true distance. The probability of a distance reading decreases exponentially with its difference from the true distance. This model is implemented in the `busters.getObservationDistribution(noisyDistance)` method.\n",
+    "\n",
+    "Hints:\n",
+    "\n",
+    "- You are implementing the online belief update for observing new evidence. Before any readings, Pacman believes the ghost could be anywhere: a uniform prior (as implemented in  `initializeUniformly`). After receiving each sensor reading, the `observe` function is called, which must update the belief at every position.\n",
+    "- **Before typing any code, draw the Bayes net of the model, and write down the equation of the inference problem you are trying to solve**. Note that, even though the marginal observation probability at this time step $t$, $P(Obs_t)$ will show up in the equations, there is no need to compute it, since it is a constant factor present in the occupation probabilities for all cells.\n",
+    "- Try printing `noisyDistance`, `emissionModel`, and `pacmanPosition` (inside the `observe` function) to get started.\n",
+    "- In the Pacman display, high posterior beliefs are represented by bright colors, while low beliefs are represented by dim colors. You should start with a large cloud of belief that shrinks over time as more evidence accumulates.\n",
+    "- Beliefs are stored as `util.Counter` objects (like dictionaries) in a field called `self.beliefs`, which you should update. You should not need to store any evidence. The only thing you need to store in `ExactInference` is `self.beliefs`."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "class ExactInference(InferenceModule):\n",
+    "    \"\"\"\n",
+    "    The exact dynamic inference module should use forward-algorithm\n",
+    "    updates to compute the exact belief function at each time step.\n",
+    "    \"\"\"\n",
+    "    def getBeliefDistribution(self):\n",
+    "        return self.beliefs\n",
+    "    \n",
+    "    def initializeUniformly(self, gameState):\n",
+    "        \"\"\"Begin with a uniform distribution over ghost positions.\n",
+    "        \n",
+    "        No need to implement anything here\"\"\"\n",
+    "        self.beliefs = util.Counter()\n",
+    "        for p in self.legalPositions: self.beliefs[p] = 1.0\n",
+    "        self.beliefs.normalize()\n",
+    "\n",
+    "    def observe(self, observation, gameState):\n",
+    "        \"\"\"\n",
+    "        Updates beliefs based on the distance observation and Pacman's position.\n",
+    "\n",
+    "        The emissionModel below provides the probability of the noisyDistance for any true\n",
+    "        distance you supply.  That is, it stores P(noisyDistance | TrueDistance).\n",
+    "\n",
+    "        self.legalPositions is a list of the possible ghost positions (you\n",
+    "        should only consider positions that are in self.legalPositions).\n",
+    "\n",
+    "        A correct implementation needs to handle the following special case:\n",
+    "          *  When a ghost is captured by Pacman, all beliefs should be updated so\n",
+    "             that the ghost appears with probability 1 in its prison cell, position \n",
+    "             self.getJailPosition()\n",
+    "\n",
+    "             You can check if a ghost has been captured by Pacman by\n",
+    "             checking if the noisyDistance is None (a noisy distance\n",
+    "             of None will be returned if, and only if, the ghost is\n",
+    "             captured).\n",
+    "\n",
+    "        \"\"\"\n",
+    "        noisyDistance = observation\n",
+    "        print noisyDistance\n",
+    "        emissionModel = busters.getObservationDistribution(noisyDistance)\n",
+    "        pacmanPosition = gameState.getPacmanPosition()\n",
+    "\n",
+    "        \"*** YOUR CODE HERE ***\"\n",
+    "\n",
+    "        # Replace this code with a correct observation update\n",
+    "        # Be sure to handle the \"jail\" edge case where the ghost is eaten\n",
+    "        # and noisyDistance is None\n",
+    "        allPossible = util.Counter()\n",
+    "        if noisyDistance == None:\n",
+    "            allPossible = util.Counter()\n",
+    "            allPossible[self.getJailPosition()] = 1.0\n",
+    "        else:\n",
+    "            for location in self.legalPositions:\n",
+    "                distance = util.manhattanDistance(location, pacmanPosition)\n",
+    "                allPossible[location] = emissionModel[distance] * self.beliefs[location]\n",
+    "        \"*** END YOUR CODE HERE ***\"\n",
+    "\n",
+    "        allPossible.normalize()\n",
+    "        self.beliefs = allPossible"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "This is how you can run a game of pacman on one of the test maps using you inference method: First, you need to load a maze layout"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "lay = layout.getLayout('q1/1-ExactObserve')  # load the layout of the map."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Other possible layouts are (these are also the ones used in the test cases):\n",
+    "\n",
+    "    q1/1-ExactObserve.lay\n",
+    "    q1/2-ExactObserve.lay\n",
+    "    q1/3-ExactObserve.lay\n",
+    "    q1/4-ExactObserve.lay\n",
+    "    q2/1-ExactElapse.lay\n",
+    "    q2/2-ExactElapse.lay\n",
+    "    q2/3-ExactElapse.lay\n",
+    "    q2/4-ExactElapse.lay\n",
+    "    q3/1-ExactObserveElapse.lay (2 ghosts)\n",
+    "    q3/2-ExactObserveElapse.lay (4 ghosts)\n",
+    "    \n",
+    "Then, Pacman and the ghosts in the game need to be assigned an `Agent` to determine their actions.\n",
+    "\n",
+    "**The maximum number of ghosts is determined by the layout. It is one unless otherwise noted in the list above. Ghost agents get a single parameter, which should be consecutive numbers starting with one, such as**\n",
+    "\n",
+    "    ghosts = [SeededRandomGhostAgent(1), GoSouthAgent(2), GoSouthAgent(3)]\n",
+    "    \n",
+    "** for a layout with 3 or more ghosts.**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "application/javascript": [
+       "\n",
+       "\n",
+       "(function(window) {\n",
+       "    function setupCanvas(width, height) {\n",
+       "\n",
+       "        var canvas = $('#myCanvas')[0];\n",
+       "        if (!(canvas===undefined)) {\n",
+       "            console.log('deleting canvas');\n",
+       "            canvas.parentElement.removeChild(canvas);\n",
+       "        }\n",
+       "        element.html(\"<canvas width=\"+width+\" height=\"+height+\" id='myCanvas'></canvas>\");\n",
+       "        container.show();\n",
+       "    }\n",
+       "\n",
+       "    var Game;\n",
+       "    var intervalId;\n",
+       "    function initGame(width, height, obj) {\n",
+       "        require([\"../static/GameTracking.js\"], function(GGame) {\n",
+       "            Game = GGame;\n",
+       "            Game.setCanvas();\n",
+       "            Game.initCanvas(width, height);\n",
+       "            Game.setMaze(obj);\n",
+       "        });\n",
+       "    };\n",
+       "    function setBeans(b) {\n",
+       "        Game.setBeans(b);\n",
+       "    };\n",
+       "    function setPowerBeans(b) {\n",
+       "        Game.setPowerBeans(b);\n",
+       "    };\n",
+       "    function placePac(x, y, d) {Game.placePacman(x, y, d);};\n",
+       "    function placeGhost(i, x, y, c, d, s, b) {Game.placeGhost(i, x, y, c, d, s, b);};\n",
+       "\n",
+       "    function start() {Game.initMaze(); Game.startGame();};\n",
+       "    function stop() {Game.stopGame()};\n",
+       "\n",
+       "    function rb(x, y) {Game.removeBean(x, y);};\n",
+       "\n",
+       "    function ud(image) {Game.updateDists(image);};\n",
+       "\n",
+       "    window.GameModule = {\n",
+       "        initGame: function (width, height, obj) {\n",
+       "            initGame(width, height, obj);\n",
+       "        },\n",
+       "        setupCanvas: function(w, h){ setupCanvas(w, h); },\n",
+       "        setBeans: function(b){ setBeans(b); },\n",
+       "        setPowerBeans: function(b){ setPowerBeans(b); },\n",
+       "        placePacman: function(x, y, d) {placePac(x, y, d);},\n",
+       "        placeGhost: function(i, x, y, c, d, s, b) {placeGhost(i, x, y, c, d, s ,b);},\n",
+       "        startGame: function() {start();},\n",
+       "        stopGame: function() {stop();},\n",
+       "        removeBean: function(x, y) {rb(x, y);},\n",
+       "        updateDists: function(image) {ud(image);}\n",
+       "    }\n",
+       "})(window);\n",
+       "\n"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# set up a game. note that layout is already set previously.\n",
+    "from tracking.bustersAgents import BustersAgent\n",
+    "from tracking.trackingTestClasses import SeededRandomGhostAgent, GoSouthAgent\n",
+    "\n",
+    "gameDisplay = NotebookGraphics()  # initialize the display of the playing field, needed here for the Pacman agent\n",
+    "\n",
+    "# set an agent for the ghost. \n",
+    "ghosts = [SeededRandomGhostAgent(1)]  # controls the behavior of a random ghost\n",
+    "# or\n",
+    "ghosts = [GoSouthAgent(1)]  # controls the behavior of a ghost that randomly tries to go south\n",
+    "\n",
+    "mr_pacman = BustersAgent(ghostAgents=ghosts, display=gameDisplay, inferenceType=ExactInference, elapseTimeEnable=False)  # controls the pacman behavior\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "To run the inference on pacman, you should set up a game as described above on one of the `q1` layouts, and observe how the probabilities, as indicated by the shading of the grid cells, behave.\n",
+    "\n",
+    "As you watch the test cases, be sure that you understand how the squares converge to their final coloring. In test cases where Pacman is boxed in (which is to say, he is unable to change his observation point), why does Pacman sometimes have trouble finding the exact location of the ghost?\n",
+    "\n",
+    "The game is initialized and run as in the previous assignment. Since Pacman can not reach the ghost in most of these layouts, the game does not end automatically, and a maximum number of moves should be given:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.setupCanvas(330, 180)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.initGame(330, 180, [[0, 8, 8, 8, 8, 8, 8, 8, 8, 8, 0], [4, 15, 1, 0, 0, 8, 0, 0, 0, 0, 1], [4, 2, 0, 0, 4, 15, 1, 0, 0, 0, 1], [4, 8, 8, 8, 0, 10, 0, 8, 8, 8, 1], [4, 11, 10, 14, 5, 15, 5, 11, 10, 14, 1], [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0]]);"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "\n",
+       "    window.GameModule.setBeans(JSON.parse(\"[]\"));\n",
+       "    window.GameModule.setPowerBeans(JSON.parse(\"[]\"));\n",
+       "    "
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placePacman(165, 75, 1)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placeGhost(0, 165, 135, \"#004ce5\", 0, 0, 0)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.startGame()"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "3\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n"
+     ]
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.updateDists([[\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"], [\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"], [\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"], [\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"], [\"#000000\", \"#001e5b\", \"#002570\", \"#002d8a\", \"#000000\", \"#002d8a\", \"#000000\", \"#002d8a\", \"#002570\", \"#001e5b\", \"#000000\"], [\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"]]);"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placePacman(165, 75, 1)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placeGhost(0, 165, 135, \"#004ce5\", 0, 0, 0)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placePacman(165, 75, 1)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placeGhost(0, 165, 135, \"#004ce5\", 0, 0, 0)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "2\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n",
+      "(5, 2)\n"
+     ]
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.updateDists([[\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"], [\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"], [\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"], [\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"], [\"#000000\", \"#001135\", \"#001a51\", \"#00287a\", \"#000000\", \"#003dba\", \"#000000\", \"#00287a\", \"#001a51\", \"#001135\", \"#000000\"], [\"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"]]);"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placePacman(165, 75, 1)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placeGhost(0, 165, 135, \"#004ce5\", 0, 0, 0)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placePacman(165, 75, 1)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "application/javascript": [
+       "window.GameModule.placeGhost(0, 165, 135, \"#004ce5\", 0, 0, 0)"
+      ],
+      "text/plain": [
+       "<IPython.core.display.Javascript object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "ename": "KeyboardInterrupt",
+     "evalue": "",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[1;31m---------------------------------------------------------------------------\u001b[0m",
+      "\u001b[1;31mKeyboardInterrupt\u001b[0m                         Traceback (most recent call last)",
+      "\u001b[1;32m<ipython-input-13-4c9b87dd42b7>\u001b[0m in \u001b[0;36m<module>\u001b[1;34m()\u001b[0m\n\u001b[0;32m      1\u001b[0m \u001b[0mgame\u001b[0m \u001b[1;33m=\u001b[0m \u001b[0mrules\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0mnewGame\u001b[0m\u001b[1;33m(\u001b[0m\u001b[0mlay\u001b[0m\u001b[1;33m,\u001b[0m \u001b[0mmr_pacman\u001b[0m\u001b[1;33m,\u001b[0m \u001b[0mghostAgents\u001b[0m\u001b[1;33m=\u001b[0m\u001b[0mghosts\u001b[0m\u001b[1;33m,\u001b[0m \u001b[0mdisplay\u001b[0m\u001b[1;33m=\u001b[0m\u001b[0mgameDisplay\u001b[0m\u001b[1;33m,\u001b[0m \u001b[0mmaxMoves\u001b[0m\u001b[1;33m=\u001b[0m\u001b[1;36m50\u001b[0m\u001b[1;33m)\u001b[0m  \u001b[1;31m# instantiate a Game instance, see below\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n\u001b[1;32m----> 2\u001b[1;33m \u001b[0mgame\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0mrun\u001b[0m\u001b[1;33m(\u001b[0m\u001b[1;33m)\u001b[0m  \u001b[1;31m# run the game, until Pacman catches a ghost.\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0m",
+      "\u001b[1;32m/aipydraipython/lib/python2.7/site-packages/pacman_tracking-0.1-py2.7.egg/tracking/game.pyc\u001b[0m in \u001b[0;36mrun\u001b[1;34m(self)\u001b[0m\n\u001b[0;32m    741\u001b[0m \u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0;32m    742\u001b[0m             \u001b[1;31m# Change the display\u001b[0m\u001b[1;33m\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n\u001b[1;32m--> 743\u001b[1;33m             \u001b[0mself\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0mdisplay\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0mupdate\u001b[0m\u001b[1;33m(\u001b[0m\u001b[0mself\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0mstate\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0mdata\u001b[0m\u001b[1;33m)\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0m\u001b[0;32m    744\u001b[0m             \u001b[1;31m###idx = agentIndex - agentIndex % 2 + 1\u001b[0m\u001b[1;33m\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0;32m    745\u001b[0m             \u001b[1;31m###self.display.update( self.state.makeObservation(idx).data )\u001b[0m\u001b[1;33m\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n",
+      "\u001b[1;32m/aipydraipython/lib/python2.7/site-packages/pacman_tracking-0.1-py2.7.egg/tracking/pacman_utils.pyc\u001b[0m in \u001b[0;36mupdate\u001b[1;34m(self, state)\u001b[0m\n\u001b[0;32m     91\u001b[0m         \u001b[0mself\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0mcapsules\u001b[0m \u001b[1;33m=\u001b[0m \u001b[0mcapsules\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0;32m     92\u001b[0m \u001b[1;33m\u001b[0m\u001b[0m\n\u001b[1;32m---> 93\u001b[1;33m         \u001b[0mself\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0m_pause\u001b[0m\u001b[1;33m(\u001b[0m\u001b[1;33m)\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0m\u001b[0;32m     94\u001b[0m \u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0;32m     95\u001b[0m     \u001b[1;32mdef\u001b[0m \u001b[0m_pause\u001b[0m\u001b[1;33m(\u001b[0m\u001b[0mself\u001b[0m\u001b[1;33m)\u001b[0m\u001b[1;33m:\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n",
+      "\u001b[1;32m/aipydraipython/lib/python2.7/site-packages/pacman_tracking-0.1-py2.7.egg/tracking/pacman_utils.pyc\u001b[0m in \u001b[0;36m_pause\u001b[1;34m(self)\u001b[0m\n\u001b[0;32m     94\u001b[0m \u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0;32m     95\u001b[0m     \u001b[1;32mdef\u001b[0m \u001b[0m_pause\u001b[0m\u001b[1;33m(\u001b[0m\u001b[0mself\u001b[0m\u001b[1;33m)\u001b[0m\u001b[1;33m:\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n\u001b[1;32m---> 96\u001b[1;33m         \u001b[0mtime\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0msleep\u001b[0m\u001b[1;33m(\u001b[0m\u001b[0mself\u001b[0m\u001b[1;33m.\u001b[0m\u001b[0m_sleep_time\u001b[0m\u001b[1;33m)\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0m\u001b[0;32m     97\u001b[0m \u001b[1;33m\u001b[0m\u001b[0m\n\u001b[0;32m     98\u001b[0m     \u001b[1;32mdef\u001b[0m \u001b[0mfinish\u001b[0m\u001b[1;33m(\u001b[0m\u001b[0mself\u001b[0m\u001b[1;33m)\u001b[0m\u001b[1;33m:\u001b[0m\u001b[1;33m\u001b[0m\u001b[0m\n",
+      "\u001b[1;31mKeyboardInterrupt\u001b[0m: "
+     ]
+    }
+   ],
+   "source": [
+    "game = rules.newGame(lay, mr_pacman, ghostAgents=ghosts, display=gameDisplay, maxMoves=50)  # instantiate a Game instance, see below\n",
+    "game.run()  # run the game, until Pacman catches a ghost.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Movement Model"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "In the previous question you implemented belief updates for Pacman based on his observations. Fortunately, Pacman's observations are not his only source of knowledge about where a ghost may be. Pacman also has knowledge about the ways that a ghost may move; namely that the ghost can not move through a wall or more than one space in one timestep.\n",
+    "\n",
+    "To understand why this is useful to Pacman, consider the following scenario in which there is Pacman and one Ghost. Pacman receives many observations which indicate the ghost is very near, but then one which indicates the ghost is very far. The reading indicating the ghost is very far is likely to be the result of a buggy sensor. Pacman's prior knowledge of how the ghost may move will decrease the impact of this reading since Pacman knows the ghost could not move so far in only one move.\n",
+    "\n",
+    "In this question, you will implement the `elapseTime` method in `ExactInferenceWithElapse`. Your agent has access to the action distribution for any `GhostAgent`.\n",
+    "The movement model is the only source of information for Pacman in this exercise. **There is no need to incorporate observations here.**\n",
+    "\n",
+    "For the tests in this question we will sometimes use a ghost with random movements (`SeededRandomGhostAgent`) and other times we will use the `GoSouthGhost`. This ghost tends to move south over time, and without any observations, Pacman's belief distribution should begin to focus around the bottom of the board. \n",
+    "\n",
+    "As you watch the visualization, remember that lighter squares indicate that pacman believes a ghost is more likely to occupy that location, and darker squares indicate a ghost is less likely to occupy that location. For which of the test cases do you notice differences emerging in the shading of the squares? Can you explain why some squares get lighter and some squares get darker?\n",
+    "\n",
+    "We assume that ghosts still move independently of one another, so while you can develop all of your code for one ghost at a time, adding multiple ghosts should still work correctly."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "class ExactInferenceWithElapse(ExactInference):\n",
+    "    def elapseTime(self, gameState):\n",
+    "        \"\"\"\n",
+    "        Updates self.beliefs according to a ghost's movement model in response to a \n",
+    "        time step passing from the current state.\n",
+    "    \n",
+    "        The ghosts's movement model is not entirely stationary: it may depend on Pacman's\n",
+    "        current position (e.g., for DirectionalGhost).  However, this is not a problem,\n",
+    "        as Pacman's current position is known.\n",
+    "    \n",
+    "        In order to obtain the distribution over new positions for the\n",
+    "        ghost, given its previous position (oldPos) as well as Pacman's\n",
+    "        current position, use this line of code:\n",
+    "    \n",
+    "          newPosDist = self.getPositionDistribution(self.setGhostPosition(gameState, oldPos))\n",
+    "    \n",
+    "        newPosDist is a util.Counter object, where for each position p in self.legalPositions,\n",
+    "    \n",
+    "            newPostDist[p] = Pr( ghost is at position p at time t + 1 | ghost is at position oldPos at time t )\n",
+    "    \n",
+    "        (and also given Pacman's current position).\n",
+    "        \n",
+    "        You will need to compute multiple position distributions for a single update.\n",
+    "        \"\"\"\n",
+    "    \n",
+    "        \"*** YOUR CODE HERE ***\"\n",
+    "        allPossible = util.Counter()\n",
+    "        for oldPos in self.legalPositions:\n",
+    "            newPosDist = self.getPositionDistribution(self.setGhostPosition(gameState, oldPos))\n",
+    "            print 'newPosDist', newPosDist\n",
+    "            for newPos, prob in newPosDist.items():\n",
+    "                allPossible[newPos] += prob*self.beliefs[oldPos]\n",
+    "\n",
+    "        self.beliefs = allPossible\n",
+    "        print 'beliefs', self.beliefs"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "As before, a layout and agents are needed to play. This time, the Pacman agent gets the new inference method with the added movement model:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "lay = layout.getLayout('q2/3-ExactElapse')  # load the layout of the map.\n",
+    "\n",
+    "from tracking.bustersAgents import BustersAgent\n",
+    "from tracking.trackingTestClasses import SeededRandomGhostAgent, GoSouthAgent\n",
+    "\n",
+    "# set an agent for the ghost. \n",
+    "\n",
+    "# ghosts = [SeededRandomGhostAgent(1)]  # controls the behavior of a random ghost\n",
+    "# or\n",
+    "ghosts = [GoSouthAgent(1)]  # controls the behavior of a ghost that randomly tries to go south\n",
+    "\n",
+    "gameDisplay = NotebookGraphics()  # initialize the display of the playing field\n",
+    "mr_pacman = BustersAgent(ghostAgents=ghosts, display=gameDisplay, inferenceType=ExactInferenceWithElapse, observeEnable=False)  # controls the pacman behavior\n",
+    "\n",
+    "game = rules.newGame(lay, mr_pacman, ghostAgents=ghosts, display=gameDisplay, maxMoves=50)  # instantiate a Game instance, see below\n",
+    "game.run()  # run the game, until Pacman catches a ghost.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Busters Agent"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now that Pacman knows how to use both his prior knowledge and his observations when figuring out where a ghost is, he is ready to hunt down ghosts on his own. This question will use your `observe` and `elapseTime` implementations together to compute a distribution over ghost positions.\n",
+    "\n",
+    "Up to this point, Pacman has moved by randomly selecting a valid action.\n",
+    "Now, On top of the Bayesian model, you will implement a simple greedy hunting strategy. In this simple greedy strategy, Pacman assumes that each ghost is in its most likely position according to its beliefs, and always moves toward the closest ghost.\n",
+    "\n",
+    "Implement the `chooseAction` method in `GreedyBustersAgent`. Your agent should first find the most likely position of each remaining (uncaptured) ghost, then choose an action that minimizes the distance to the closest ghost. If correctly implemented, your agent should win the game on the `q3/3-gameScoreTest` layout with a score greater than 700 at least 8 out of 10 times. \n",
+    "\n",
+    "*Note:* the autograder will also check the correctness of your inference directly, but the outcome of games is a reasonable sanity check.\n",
+    "\n",
+    "\n",
+    "Hints:\n",
+    "\n",
+    "- When correctly implemented, your agent will thrash around a bit in order to capture a ghost.\n",
+    "- Make sure to only consider the living ghosts, as described in the docstring (comment)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "from tracking.bustersAgents import BustersAgent\n",
+    "from tracking.distanceCalculator import Distancer\n",
+    "\n",
+    "class GreedyBustersAgent(BustersAgent):\n",
+    "    \"An agent that charges the closest ghost.\"\n",
+    "    \n",
+    "    def __init__(self, *args, **kwargs):\n",
+    "        \"\"\"No need to change anything here\"\"\"\n",
+    "        super(GreedyBustersAgent, self).__init__(*args, **kwargs)\n",
+    "\n",
+    "    def registerInitialState(self, gameState):\n",
+    "        \"Pre-computes the distance between every two points.\"\n",
+    "        BustersAgent.registerInitialState(self, gameState)\n",
+    "        self.distancer = Distancer(gameState.data.layout, False)\n",
+    "\n",
+    "    def chooseAction(self, gameState):\n",
+    "        \"\"\"\n",
+    "        First computes the most likely position of each ghost that\n",
+    "        has not yet been captured, then chooses an action that brings\n",
+    "        Pacman closer to the closest ghost (in maze distance!).\n",
+    "\n",
+    "        To find the maze distance between any two positions, use:\n",
+    "        self.distancer.getDistance(pos1, pos2)\n",
+    "\n",
+    "        To find the successor position of a position after an action:\n",
+    "        successorPosition = Actions.getSuccessor(position, action)\n",
+    "\n",
+    "        livingGhostPositionDistributions, defined below, is a list of\n",
+    "        util.Counter objects equal to the position belief distributions\n",
+    "        for each of the ghosts that are still alive.  It is defined based\n",
+    "        on (these are implementation details about which you need not be\n",
+    "        concerned):\n",
+    "\n",
+    "          1) gameState.getLivingGhosts(), a list of booleans, one for each\n",
+    "             agent, indicating whether or not the agent is alive.  Note\n",
+    "             that pacman is always agent 0, so the ghosts are agents 1,\n",
+    "             onwards (just as before).\"\"\n",
+    "\n",
+    "          2) self.ghostBeliefs, the list of belief distributions for each\n",
+    "             of the ghosts (including ghosts that are not alive).  The\n",
+    "             indices into this list should be 1 less than indices into the\n",
+    "             gameState.getLivingGhosts() list.\n",
+    "\n",
+    "        \"\"\"\n",
+    "        pacmanPosition = gameState.getPacmanPosition()\n",
+    "        legal = [a for a in gameState.getLegalPacmanActions()]\n",
+    "        livingGhosts = gameState.getLivingGhosts()\n",
+    "        livingGhostPositionDistributions = [beliefs for i, beliefs\n",
+    "                                            in enumerate(self.ghostBeliefs)\n",
+    "                                            if livingGhosts[i+1]]\n",
+    "        \"*** YOUR CODE HERE ***\"\n",
+    "        localMax = []\n",
+    "        for belief in livingGhostPositionDistributions:\n",
+    "            localMax.append(belief.argMax())\n",
+    "        goalCoordinate, goalProbability = None, 0\n",
+    "        for index, coordinate in enumerate(localMax):\n",
+    "            if livingGhostPositionDistributions[index][coordinate] >= goalProbability:\n",
+    "                goalCoordinate, goalProbability = coordinate, livingGhostPositionDistributions[index][coordinate]\n",
+    "\n",
+    "        temp = []\n",
+    "        for action in legal:\n",
+    "            nextLocation = Actions.getSuccessor(pacmanPosition, action)\n",
+    "            temp.append((self.distancer.getDistance(nextLocation, goalCoordinate), action))\n",
+    "        return min(temp)[1]\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "ghosts = [SeededRandomGhostAgent(1), SeededRandomGhostAgent(2)]  # controls the behavior of two ghosts\n",
+    "\n",
+    "gameDisplay = NotebookGraphics()  # initialize the display of the playin0g field\n",
+    "mr_pacman = GreedyBustersAgent(ghostAgents=ghosts, display=gameDisplay, inferenceType=ExactInference)  # controls the pacman behavior\n",
+    "\n",
+    "lay = layout.getLayout('q3/2-ExactObserveElapse')  # load the layout of the map\n",
+    "\n",
+    "game = rules.newGame(lay, mr_pacman, ghostAgents=ghosts, display=gameDisplay, maxMoves=50)  # instantiate a Game instance, see below\n",
+    "game.run()  # run the game, until Pacman is caught by a ghost or there is no food left\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 2",
+   "language": "python",
+   "name": "python2"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 2
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython2",
+   "version": "2.7.9"
+  },
+  "name": "Assignment_5_bayNet_pacman"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 0
+}

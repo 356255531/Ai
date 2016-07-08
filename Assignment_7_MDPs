@@ -1,0 +1,471 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "application/javascript": [
+       "IPython.notebook.set_autosave_interval(0)"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Autosave disabled\n"
+     ]
+    }
+   ],
+   "source": [
+    "import numpy as np\n",
+    "%matplotlib inline\n",
+    "import matplotlib.pyplot as plt\n",
+    "%autosave 0"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Assignment 7 - Markov Decision Processes"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "In this exercise, we will implement a simple algorithm to calculate the utility function in a Markov decision process; namely *Value Iteration*. \n",
+    "We will use the algorithm to solve the simple toy problem from the lecture. We could then transfer it to other domains, for example a problem where Pacman is slightly drunk and cannot rely on his actions being executed properly, so that he has to model his behavior stochastically. However, in the interest of time, this is not part of this assignment.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Example problem definition"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "First, we will model the toy problem for the lecture. This is what it looks like, with the reward values for each state filled in:\n",
+    "\n",
+    "<img height=\"200\" width=\"300\" src=\"https://public.lsr.ei.tum.de/team/landsiedel/ai_images/mdp_grid_numpy-0.png\"/>\n",
+    "\n",
+    "Note that the indexing has changed with respect to the one used in the lecture, to better accomodate the table structures used in this exercise.\n",
+    "\n",
+    "All important information about the map will be put in `numpy.arrays` of the size `map_shape`:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "map_shape = (3, 4)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The `map_arr` array contains information about which cells are traversible (in the example, all but $(1, 1)$)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "map_arr = np.zeros(map_shape, dtype=np.bool)  # initialize an all-zero array\n",
+    "map_arr[:] = True  # This assigns a scalar value to all elements of the array, while keeping its shape.\n",
+    "map_arr[1, 1] = False\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The `final_arr` is an array of booleans, which is true for those states which are terminal states (the ones with boxes around their reward values in the image above)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "final_arr = np.zeros(map_shape, dtype=np.bool)\n",
+    "final_arr[:] = False\n",
+    "final_arr[0, 3] = True\n",
+    "final_arr[1, 3] = True\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Finally, the reward values are set in the `rewards` array."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "rewards = np.zeros(map_shape)\n",
+    "rewards[:] = -0.04\n",
+    "rewards[0, 3] = 1\n",
+    "rewards[1, 3] = -1\n",
+    "\n",
+    "# print final_arr\n",
+    "# print rewards\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The movement model of the agent gives the probability of a state transition, given an action. It is implemented as a dict that maps actions (in this case `u, d, r, l` for up, down, right and left) to a dict of possible moves. The keys of the inner dict are moves, i.e., the difference in the state effected by the transition, and the values are the corresponding probabilities."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "from collections import OrderedDict\n",
+    "\n",
+    "actions = OrderedDict({'u': {(-1, 0): .8, (0, -1): .1, (0, 1): .1},\n",
+    "                       'l': {(0, -1): .8, (1, 0): .1, (-1, 0): .1},\n",
+    "                       'd': {(1, 0): .8, (0, -1): .1, (0, 1): .1},\n",
+    "                       'r': {(0, 1): .8, (1, 0): .1, (-1, 0): .1}})\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "If a move would lead to a cell on the playing field that is not traversible (either outside of the map, or a wall), the agent stays at its current position. This utility function is handy to determine if the state resulting from a move is still on the map:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "def in_bounds(state, map_shape):\n",
+    "    \"\"\"utility function to determine if `state` is inside the map.\"\"\"\n",
+    "    return 0 <= state[0] < map_shape[0] and 0 <= state[1] < map_shape[1]\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Furthermore, we want to solve the MDP for an undiscounted cost function, so we set the discount factor $\\gamma$ to $1$."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "gamma = 1\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "With this, the complete model of the MDP is known. Now we can do"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Exercise 1: Value Iteration"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The value iteration algorithm iteratively updates the utility function $U(s)$ of an MDP model. It is motivated by the Bellman equation:\n",
+    "\n",
+    "$$U(s) = R(s) + \\gamma \\max_{a \\in A(s)} \\sum_{s^\\prime} P(s^\\prime \\vert s, a) U(s^\\prime)$$\n",
+    "\n",
+    "Value iteration does not solve this complex, nonlinear system of equations. Instead, for every state $s$, it computes the value of the right-hand side of the Bellman equation, and then assumes this as a new estimate of the true utility function. This process is repeated until the error between old and new estimate is below a threshold.\n",
+    "\n",
+    "To start the algorithm, we initialize all utility estimates to zero:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "# initialize utilities\n",
+    "def init_utils(map_shape, rewards):\n",
+    "    \"\"\"initialize all utilities to zero, or to the rewards for final states\"\"\"\n",
+    "    utilities = np.zeros(map_shape)\n",
+    "    utilities[final_arr] = rewards[final_arr]\n",
+    "\n",
+    "    return utilities\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now, your task is to implement the utility update step by computing the right-hand side of the Bellman equation above once for every state:\n",
+    "\n",
+    "*(Note: This is the most demanding exercise of this assignment, the rest will be mostly evaluation and reuse of code from this exercise)*\n",
+    "\n",
+    "*Hint:* Note that we do not yet use the just calculated new utility values of states when we compute the values of neighbouring states, but update all the values only once after having calculated the new value for all states. "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "def update_utils(utilities, map_shape, map_arr, rewards, final_arr, actions, gamma):\n",
+    "    \"\"\"run one single step of value iteration\"\"\"\n",
+    "    new_utilities = np.zeros(map_shape)\n",
+    "    new_utilities[final_arr] = rewards[final_arr]\n",
+    "\n",
+    "    \"\"\"***Your Code here ***\"\"\"\n",
+    "    for i in xrange(map_shape[0]):\n",
+    "        for j in xrange(map_shape[1]):\n",
+    "            if final_arr[i, j] or not map_arr[i, j]:\n",
+    "                continue\n",
+    "\n",
+    "            templeList = []\n",
+    "            for a in actions.keys():\n",
+    "                temp = 0\n",
+    "                for b in actions[a].keys():\n",
+    "                    mm, nn = b\n",
+    "                    if in_bounds((mm + i, nn + j), map_shape) and map_arr[(mm + i, nn + j)]:\n",
+    "                        temp += actions[a][b] * utilities[mm + i, nn + j]\n",
+    "                    else:\n",
+    "                        temp += actions[a][b] * utilities[i, j]\n",
+    "                templeList.append(temp)\n",
+    "\n",
+    "            new_utilities[i, j]  = rewards[i, j] + gamma * max(templeList)\n",
+    "    # This copies the values from new_utilities to utilities\n",
+    "    utilities[:] = new_utilities[:]\n",
+    "    # strictly, there is no return value needed, since `utilities` is\n",
+    "    # also updated in the calling function, but leave this in for\n",
+    "    # the grading to work!\n",
+    "    return utilities\n",
+    "\n",
+    "from copy import deepcopy\n",
+    "from numpy.linalg import norm\n",
+    "utilities = init_utils(map_shape, rewards)\n",
+    "pre = deepcopy(utilities)\n",
+    "error = 10\n",
+    "while error > 10e-4:\n",
+    "    utilities = update_utils(utilities, map_shape, map_arr, rewards, final_arr, actions, gamma)\n",
+    "    error = norm(utilities - pre)\n",
+    "    pre = deepcopy(utilities)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "You can visualize the utilities after each step as a color image with this command:\n",
+    "\n",
+    "```\n",
+    "plt.imshow(utilities, interpolation='nearest')\n",
+    "```\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Exercise 2: Evaluating the error"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now run a few steps of value iteration on the problem given above. The values should quickly converge to those given in the lecture. Compute the Euclidean distance between old and new utility estimates for each step, and visualize them. How many iterations of the algorithms have to be run so that the distance between estimates goes below $10^{-4}$? Determine this number of necessary iterations for the problem given in this notebook; your `min_num_iterations` function should then return this very number.\n",
+    "\n",
+    "**Note:**\n",
+    "To calculate the error, you need to keep track of the utilities before updating them in each step. Since the implementation of the `update_utils` function as given above changes the value of the `utilities` variable also in the calling function (like a C++ *call by reference*), a copy of the old values can be made like so:\n",
+    "\n",
+    "```\n",
+    "bkp_utilities = utilities.copy()\n",
+    "update_utils(utilities, map_shape, map_arr, rewards, final_arr, actions, gamma)\n",
+    "# compute distance between `utilities` and `bkp_utilities`, etc.\n",
+    "\n",
+    "# check convergence using this command to plot the errors\n",
+    "plt.plot(distances)\n",
+    "```"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "def min_num_iterations():\n",
+    "    \"\"\"\n",
+    "    return the minimum number of iterations of value iteration\n",
+    "    needed on the problem given above so that the Euclidean\n",
+    "    distance between utility estimates is smaller than 10**-4\n",
+    "    \"\"\"\n",
+    "    return 21  # just change this\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Exercise 3: Get strategy from utilities"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now that we have a good estimate of the utility function, we want to use it to decide on actions. Implement the following function, which extracts the optimal policy for the utility function given as an argument. You should be able to reuse most of your value iteration code for this exercise.\n",
+    "\n",
+    "The return value of the function should be a numpy array of single characters, where the entry for traversible and nonterminal states should be the key of the optimal action in the movement model (see above), and `'x'` for all other states."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "def get_strategy(utilities, map_shape, map_arr, final_arr, actions):\n",
+    "    strategy = np.zeros(map_shape, dtype=np.character)\n",
+    "\n",
+    "    \"\"\"*** Your code here ***\"\"\"\n",
+    "    import operator\n",
+    "    for i in xrange(map_shape[0]):\n",
+    "        for j in xrange(map_shape[1]):\n",
+    "            if final_arr[i, j] or not map_arr[i, j]:\n",
+    "                strategy[i, j] = 'x'\n",
+    "                continue\n",
+    "\n",
+    "            valueList = {}\n",
+    "            for a in actions.keys():\n",
+    "                temp = 0\n",
+    "                for b in actions[a]:\n",
+    "                    mm, nn = b\n",
+    "                    if in_bounds((mm + i, nn + j), map_shape) and map_arr[(mm + i, nn + j)]:\n",
+    "                        temp += actions[a][b] * utilities[mm + i, nn + j]\n",
+    "                    else:\n",
+    "                        temp += actions[a][b] * utilities[i, j]\n",
+    "                valueList[a] = temp\n",
+    "            \n",
+    "            action = max(valueList.iteritems(), key=operator.itemgetter(1))[0]\n",
+    "            strategy[i, j] = action\n",
+    "\n",
+    "    return strategy\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {
+    "collapsed": false,
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[['r' 'r' 'r' 'x']\n",
+      " ['u' 'x' 'u' 'x']\n",
+      " ['u' 'l' 'l' 'l']]\n"
+     ]
+    }
+   ],
+   "source": [
+    "strategy = get_strategy(utilities, map_shape, map_arr, final_arr, actions)\n",
+    "print strategy"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 2",
+   "language": "python",
+   "name": "python2"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 2
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython2",
+   "version": "2.7.9"
+  },
+  "name": "Assignment_7_MDPs"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 0
+}
